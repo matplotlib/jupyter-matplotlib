@@ -19,6 +19,10 @@ var MPLCanvasModel = widgets.DOMWidgetModel.extend({
             header_visible: true,
             toolbar: null,
             toolbar_visible: true,
+            closed: false,
+            _data_url: null,
+            width: 0,
+            height: 0,
             toolbar_position: 'horizontal'
         });
     }
@@ -38,7 +42,6 @@ var MPLCanvasView = widgets.DOMWidgetView.extend({
         this.image_mode = 'full';
 
         this.figure = document.createElement('div');
-        this.figure.addEventListener('remove', this.close.bind(this));
         this.figure.classList = 'jupyter-matplotlib-figure jupyter-widgets widget-container widget-box widget-vbox';
 
         this._init_header();
@@ -53,7 +56,12 @@ var MPLCanvasView = widgets.DOMWidgetView.extend({
         return this.create_child_view(this.model.get('toolbar')).then(function(toolbar_view) {
             that.toolbar_view = toolbar_view;
 
+            toolbar_view.on('close',that.handle_close.bind(that));
+
             that.update_toolbar_position();
+
+            that.update_header_visible();
+            that.update_toolbar_visible();
 
             that.model_events();
 
@@ -69,6 +77,10 @@ var MPLCanvasView = widgets.DOMWidgetView.extend({
     },
 
     send_initialization_message: function() {
+        if (this.model.get('closed')) {
+            return;
+        }
+
         if (this.ratio != 1) {
             this.send_message('set_dpi_ratio', {'dpi_ratio': this.ratio});
         }
@@ -80,12 +92,10 @@ var MPLCanvasView = widgets.DOMWidgetView.extend({
 
     update_header_visible: function() {
         this.header.style.display = this.model.get('header_visible') ? '': 'none';
-        this.request_resize();
     },
 
     update_toolbar_visible: function() {
-        this.toolbar_view.el.style.display = this.model.get('toolbar_visible') ? '' : 'none';
-        this.request_resize();
+        this.toolbar_view.el.style.display = this.model.get('toolbar_visible') && !this.model.get('closed') ? '' : 'none';
     },
 
     update_toolbar_position: function() {
@@ -117,14 +127,20 @@ var MPLCanvasView = widgets.DOMWidgetView.extend({
                 this.el.appendChild(this.toolbar_view.el);
             }
         }
-
-        this.request_resize();
     },
 
     clear: function() {
         while (this.el.firstChild) {
             this.el.removeChild(this.el.firstChild);
         }
+    },
+
+    handle_close: function() {
+        this.model.set('_data_url', this.canvas.toDataURL());
+        this.model.set('closed', true);
+        this.model.save_changes();
+
+        this.update_toolbar_visible();
     },
 
     _init_header: function() {
@@ -209,12 +225,21 @@ var MPLCanvasView = widgets.DOMWidgetView.extend({
                 // almost always do), so we need to clear the canvas so that
                 // there is no ghosting.
                 that.context.clearRect(0, 0, that.canvas.width, that.canvas.height);
+                if (that.model.get('width') != that.canvas.width || that.model.get('height') != that.canvas.height) {
+                    that._resize_canvas(that.model.get('width'), that.model.get('height'));
+                }
             }
             that.context.drawImage(that.image, 0, 0);
         };
 
         this.image.onunload = function() {
             that.close();
+        }
+
+        // Draw saved state if the communication is closed
+        if (this.model.get('closed')) {
+            this.image_mode = 'full';
+            this.image.src = this.model.get('_data_url');
         }
     },
 
@@ -225,60 +250,6 @@ var MPLCanvasView = widgets.DOMWidgetView.extend({
         this.header.style.flexShrink = 0;
         this.footer.classList = 'jupyter-widgets widget-label';
         this.figure.appendChild(this.footer);
-    },
-
-    _calculate_decorations_size: function() {
-        // Calculate the size of the decorations on the figure.
-        var decorations_width = 0;
-        var decorations_height = 0;
-
-        // Toolbar size
-        var toolbar_position = this.model.get('toolbar_position');
-        if (toolbar_position == 'top' || toolbar_position == 'bottom') {
-            decorations_height += utils.get_full_size(this.toolbar_view.el).height;
-        } else {
-            decorations_width += utils.get_full_size(this.toolbar_view.el).width;
-        }
-
-        // Label sizes
-        decorations_height += utils.get_full_size(this.header).height;
-        decorations_height += utils.get_full_size(this.footer).height;
-
-        // Margins on the canvas
-        var canvas_div_margins = utils.get_margin_size(this.canvas_div);
-        decorations_width += canvas_div_margins.width;
-        decorations_height += canvas_div_margins.height;
-
-        // Margins on the figure div
-        var figure_margins = utils.get_margin_size(this.figure);
-        decorations_width += figure_margins.width;
-        decorations_height += figure_margins.height;
-
-        return {
-            width: decorations_width,
-            height: decorations_height
-        };
-    },
-
-    request_resize: function() {
-        // Ensure that the image already exists. We ignore the first calls to resize
-        // because we want the widget to first adapt to the figure size set in
-        // matplotlib.
-        if (!this.image.src) {
-            return;
-        }
-
-        // Using the given widget size, figure out how big the canvas should be.
-        var decorations_size = this._calculate_decorations_size();
-
-        var new_canvas_width = this.el.clientWidth - decorations_size.width;
-        var new_canvas_height = this.el.clientHeight - decorations_size.height;
-
-        // Ensure that the canvas size is a positive number.
-        new_canvas_width = new_canvas_width < 1 ? 1 : new_canvas_width;
-        new_canvas_height = new_canvas_height < 1 ? 1 : new_canvas_height;
-
-        this.send_message('resize', {'width': new_canvas_width, 'height': new_canvas_height});
     },
 
     _resize_canvas: function(width, height) {
@@ -292,13 +263,6 @@ var MPLCanvasView = widgets.DOMWidgetView.extend({
 
         this.canvas_div.style.width = width + 'px';
         this.canvas_div.style.height = height + 'px';
-
-        // Figure out the widget size.
-        var decorations_size = this._calculate_decorations_size();
-
-        // Reset the widget size to adapt to this figure.
-        this.el.style.width = width + decorations_size.width + 'px';
-        this.el.style.height = height + decorations_size.height + 'px';
     },
 
     send_message: function(type, message = {}) {
@@ -328,7 +292,10 @@ var MPLCanvasView = widgets.DOMWidgetView.extend({
         if (size[0] != this.canvas.width || size[1] != this.canvas.height) {
             this._resize_canvas(size[0], size[1]);
             this.send_message('refresh');
-        };
+        }
+        this.model.set('width', size[0]);
+        this.model.set('height', size[1]);
+        this.model.save_changes();
     },
 
     handle_rubberband: function(msg) {
@@ -431,17 +398,6 @@ var MPLCanvasView = widgets.DOMWidgetView.extend({
         }
     },
 
-    processPhosphorMessage: function(msg) {
-        MPLCanvasView.__super__.processPhosphorMessage.apply(this, arguments);
-
-        switch (msg.type) {
-        case 'resize':
-            this.request_resize();
-            break;
-        }
-    },
-
-
     mouse_event: function(name) {
         var that = this;
         var last_update = 0;
@@ -515,11 +471,6 @@ var MPLCanvasView = widgets.DOMWidgetView.extend({
             that.send_message(name, {key: value, guiEvent: utils.get_simple_keys(event)});
             return false;
         };
-    },
-
-    close: function(){
-        this.send_message('closing');
-        this.trigger('close');
     }
 });
 
