@@ -1,11 +1,9 @@
 """Interactive figures in the Jupyter notebook"""
 
-from base64 import b64encode
 import json
-import io
 import os
 
-from IPython.display import display, HTML
+from IPython.display import display
 
 from ipywidgets import DOMWidget, widget_serialization
 from traitlets import (
@@ -13,12 +11,10 @@ from traitlets import (
     default
 )
 
-from matplotlib import rcParams
+from matplotlib import rcParams, backend_bases
 from matplotlib.figure import Figure
 from matplotlib import is_interactive
-from matplotlib.backends.backend_webagg_core import (FigureManagerWebAgg,
-                                                     FigureCanvasWebAggCore,
-                                                     NavigationToolbar2WebAgg,
+from matplotlib.backends.backend_webagg_core import (FigureCanvasWebAggCore,
                                                      TimerTornado)
 from matplotlib.backend_bases import (ShowBase, NavigationToolbar2,
                                       FigureCanvasBase, cursors)
@@ -90,7 +86,7 @@ def connection_info():
     return '\n'.join(result)
 
 
-class Toolbar(DOMWidget, NavigationToolbar2WebAgg):
+class Toolbar(DOMWidget, backend_bases.NavigationToolbar2):
 
     _model_module = Unicode('jupyter-matplotlib').tag(sync=True)
     _model_module_version = Unicode(js_semver).tag(sync=True)
@@ -111,20 +107,36 @@ class Toolbar(DOMWidget, NavigationToolbar2WebAgg):
 
     def __init__(self, canvas, *args, **kwargs):
         DOMWidget.__init__(self, *args, **kwargs)
-        NavigationToolbar2WebAgg.__init__(self, canvas, *args, **kwargs)
+        backend_bases.NavigationToolbar2.__init__(self, canvas, *args, **kwargs)
 
         self.on_msg(self.canvas._handle_message)
 
-    def export(self):
-        buf = io.BytesIO()
-        self.canvas.figure.savefig(buf, format='png', dpi='figure')
-        # Figure width in pixels
-        pwidth = self.canvas.figure.get_figwidth() * self.canvas.figure.get_dpi()
-        # Scale size to match widget on HiPD monitors
-        width = pwidth / self.canvas._dpi_ratio
-        data = "<img src='data:image/png;base64,{0}' width={1}/>"
-        data = data.format(b64encode(buf.getvalue()).decode('utf-8'), width)
-        display(HTML(data))
+    def _init_toolbar(self):
+        self.message = ''
+        self.cursor = 0
+
+    def set_message(self, message):
+        if message != self.message:
+            self.canvas.send_event("message", message=message)
+        self.message = message
+
+    def set_cursor(self, cursor):
+        if cursor != self.cursor:
+            self.canvas.send_event("cursor", cursor=cursor)
+        self.cursor = cursor
+
+    def draw_rubberband(self, event, x0, y0, x1, y1):
+        self.canvas.send_event(
+            "rubberband", x0=x0, y0=y0, x1=x1, y1=y1)
+
+    def release_zoom(self, event):
+        backend_bases.NavigationToolbar2.release_zoom(self, event)
+        self.canvas.send_event(
+            "rubberband", x0=-1, y0=-1, x1=-1, y1=-1)
+
+    def save_figure(self, *args):
+        """Save the current figure"""
+        self.canvas.send_event('save')
 
     @default('toolitems')
     def _default_toolitems(self):
@@ -235,8 +247,8 @@ class Canvas(DOMWidget, FigureCanvasWebAggCore):
             # Default: send the message to the front-end
             self.send({'data': json.dumps(content)})
 
-    def send_binary(self, data):
-        self.send({'data': '{"type": "binary"}'}, buffers=[data])
+    def refresh(self):
+        self.send({'data': '{"type": "binary"}'}, buffers=[self.get_diff_image()])
 
     def new_timer(self, *args, **kwargs):
         return TimerTornado(*args, **kwargs)
@@ -248,12 +260,13 @@ class Canvas(DOMWidget, FigureCanvasWebAggCore):
         FigureCanvasBase.stop_event_loop_default(self)
 
 
-class FigureManager(FigureManagerWebAgg):
+class FigureManager(backend_bases.FigureManagerBase):
     ToolbarCls = Toolbar
 
     def __init__(self, canvas, num):
-        FigureManagerWebAgg.__init__(self, canvas, num)
-        self.web_sockets = [self.canvas]
+        backend_bases.FigureManagerBase.__init__(self, canvas, num)
+
+        self.toolbar = self.ToolbarCls(canvas)
 
     def show(self):
         if self.canvas._closed:
@@ -262,8 +275,25 @@ class FigureManager(FigureManagerWebAgg):
         else:
             self.canvas.draw_idle()
 
-    def destroy(self):
-        self.canvas.close()
+    def resize(self, w, h):
+        self._send_event(
+            'resize',
+            size=(w / self.canvas._dpi_ratio, h / self.canvas._dpi_ratio)
+        )
+
+    def set_window_title(self, title):
+        self._send_event('figure_label', label=title)
+
+    def handle_json(self, content):
+        self.canvas.handle_event(content)
+
+    def refresh_all(self):
+        self.canvas.refresh()
+
+    def _send_event(self, event_type, **kwargs):
+        payload = {'type': event_type, **kwargs}
+        self.canvas.send_json(payload)
+
 
 
 def new_figure_manager(num, *args, **kwargs):
