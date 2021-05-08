@@ -49,6 +49,7 @@ If you use JupyterLab 2, you still need to install the labextension manually:
 conda install -c conda-forge nodejs
 jupyter labextension install @jupyter-widgets/jupyterlab-manager jupyter-matplotlib
 ```
+Make sure to restart JupyterLab after installing the extension
 
 #### Install an old JupyterLab extension
 
